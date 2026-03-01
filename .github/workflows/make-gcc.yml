@@ -1,0 +1,313 @@
+# 此工作流用于在 Linux 平台上使用 GCC 编译器构建 mutt 项目
+name: Build with GCC
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.target_arch }}-gcc
+      cancel-in-progress: true
+
+    strategy:
+      fail-fast: ${{ github.ref == 'refs/heads/master' }}
+
+      matrix:
+        build_type: [Release]
+        target_arch: [mipsel]
+        include:
+          - os: ubuntu-latest
+            target_arch: mipsel
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Sync Submodules
+      run: |
+        git submodule update --init --recursive
+        echo "nproc:$(nproc)"
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential autoconf automake libtool pkg-config autopoint
+        sudo apt-get install -y libgnutls28-dev libgsasl-dev libidn2-dev libsecret-1-dev gettext
+        sudo apt-get install -y libncurses5-dev libncursesw5-dev libgpgme-dev
+
+    - name: Install MIPS cross-compiler
+      if: matrix.target_arch == 'mipsel'
+      run: |
+        mkdir temp
+        cd temp
+        wget https://github.com/themactep/thingino-firmware/releases/download/toolchain-x86_64/thingino-toolchain-x86_64_xburst1_4_4_musl_gcc14-linux-mipsel.tar.gz
+        tar -xzf thingino-toolchain-x86_64_xburst1_4_4_musl_gcc14-linux-mipsel.tar.gz
+        mv mipsel-thingino-linux-musl_sdk-buildroot /tmp/
+        ls -ltr /tmp/mipsel-thingino-linux-musl_sdk-buildroot/
+        /tmp/mipsel-thingino-linux-musl_sdk-buildroot/relocate-sdk.sh
+        echo "/tmp/mipsel-thingino-linux-musl_sdk-buildroot/bin" >> $GITHUB_PATH
+        echo "TOOLCHAIN_DIR=/tmp/mipsel-thingino-linux-musl_sdk-buildroot" >> $GITHUB_ENV
+        echo "PATH=${TOOLCHAIN_DIR}/bin:$PATH" >> $GITHUB_ENV
+        cd ../
+        rm -rf temp
+
+    - name: Build ncurses for MIPS
+      if: matrix.target_arch == 'mipsel'
+      run: |
+        export TOOLCHAIN_DIR=/tmp/mipsel-thingino-linux-musl_sdk-buildroot
+        export PATH=${TOOLCHAIN_DIR}/bin:$PATH
+        export CC=mipsel-thingino-linux-musl-gcc
+        export CXX=mipsel-thingino-linux-musl-g++
+        export AR=mipsel-thingino-linux-musl-ar
+        export STRIP=mipsel-thingino-linux-musl-strip
+        export RANLIB=mipsel-thingino-linux-musl-ranlib
+        
+        mkdir -p /tmp/ncurses-build
+        cd /tmp/ncurses-build
+        wget https://ftp.gnu.org/gnu/ncurses/ncurses-6.4.tar.gz
+        tar -xzf ncurses-6.4.tar.gz
+        cd ncurses-6.4
+        
+        ./configure \
+          --host=mipsel-linux-musl \
+          --prefix=/tmp/ncurses-mipsel \
+          --without-shared \
+          --with-static \
+          --without-debug \
+          --enable-widec \
+          --without-ada \
+          --without-tests \
+          --with-fallbacks=xterm,xterm-256color,vt100,linux,screen \
+          --without-cxx-binding \
+          --without-cxx \
+          --without-progs
+        
+        make -j$(nproc)
+        make install
+        
+        echo "NCURSES_DIR=/tmp/ncurses-mipsel" >> $GITHUB_ENV
+        echo "NCURSES_LIBS=/tmp/ncurses-mipsel/lib/libncursesw.a" >> $GITHUB_ENV
+        echo "NCURSES_CFLAGS=-I/tmp/ncurses-mipsel/include" >> $GITHUB_ENV
+
+    - name: Build GnuTLS for MIPS
+      if: matrix.target_arch == 'mipsel'
+      run: |
+        export TOOLCHAIN_DIR=/tmp/mipsel-thingino-linux-musl_sdk-buildroot
+        export PATH=${TOOLCHAIN_DIR}/bin:$PATH
+        export CC=mipsel-thingino-linux-musl-gcc
+        export CXX=mipsel-thingino-linux-musl-g++
+        export AR=mipsel-thingino-linux-musl-ar
+        export STRIP=mipsel-thingino-linux-musl-strip
+        export RANLIB=mipsel-thingino-linux-musl-ranlib
+        
+        # Build GMP
+        mkdir -p /tmp/gmp-build
+        cd /tmp/gmp-build
+        wget https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz
+        tar -xf gmp-6.3.0.tar.xz
+        cd gmp-6.3.0
+        ./configure --host=mipsel-linux-musl --prefix=/tmp/gnutls-mipsel --disable-shared --enable-static
+        make -j$(nproc)
+        make install
+        
+        # Build Nettle
+        mkdir -p /tmp/nettle-build
+        cd /tmp/nettle-build
+        wget https://ftp.gnu.org/gnu/nettle/nettle-3.9.1.tar.gz
+        tar -xzf nettle-3.9.1.tar.gz
+        cd nettle-3.9.1
+        ./configure --host=mipsel-linux-musl --prefix=/tmp/gnutls-mipsel --disable-shared --enable-static --with-include-path=/tmp/gnutls-mipsel/include --with-lib-path=/tmp/gnutls-mipsel/lib
+        make -j$(nproc)
+        make install
+        
+        # Build GnuTLS
+        mkdir -p /tmp/gnutls-build
+        cd /tmp/gnutls-build
+        wget https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-3.8.2.tar.xz
+        tar -xf gnutls-3.8.2.tar.xz
+        cd gnutls-3.8.2
+        ./configure \
+          --host=mipsel-linux-musl \
+          --prefix=/tmp/gnutls-mipsel \
+          --disable-shared \
+          --enable-static \
+          --with-included-libtasn1 \
+          --with-included-unistring \
+          --without-p11-kit \
+          --disable-doc \
+          --disable-tests \
+          --disable-tools \
+          --disable-cxx \
+          --disable-guile \
+          --disable-nls \
+          NETTLE_CFLAGS="-I/tmp/gnutls-mipsel/include" \
+          NETTLE_LIBS="-L/tmp/gnutls-mipsel/lib -lnettle" \
+          HOGWEED_CFLAGS="-I/tmp/gnutls-mipsel/include" \
+          HOGWEED_LIBS="-L/tmp/gnutls-mipsel/lib -lhogweed" \
+          GMP_CFLAGS="-I/tmp/gnutls-mipsel/include" \
+          GMP_LIBS="-L/tmp/gnutls-mipsel/lib -lgmp"
+        make -j$(nproc)
+        make install
+        
+        echo "GNUTLS_DIR=/tmp/gnutls-mipsel" >> $GITHUB_ENV
+        echo "GNUTLS_LIBS=/tmp/gnutls-mipsel/lib/libgnutls.a" >> $GITHUB_ENV
+        echo "GNUTLS_CFLAGS=-I/tmp/gnutls-mipsel/include" >> $GITHUB_ENV
+
+    - name: Generate configure script
+      run: |
+        autoreconf -fi
+
+    - name: Check GnuTLS installation
+      run: |
+        echo "=== GnuTLS installation ==="
+        ls -la /tmp/gnutls-mipsel/lib/
+        ls -la /tmp/gnutls-mipsel/include/gnutls/
+        echo "=== pkgconfig ==="
+        cat /tmp/gnutls-mipsel/lib/pkgconfig/gnutls.pc 2>/dev/null || echo "No gnutls.pc found"
+        echo "=== Testing cross-compiler can find gnutls ==="
+        export TOOLCHAIN_DIR=/tmp/mipsel-thingino-linux-musl_sdk-buildroot
+        export PATH=${TOOLCHAIN_DIR}/bin:$PATH
+        export CC=mipsel-thingino-linux-musl-gcc
+        echo 'int main() { return 0; }' | $CC -o /tmp/test -x c - -L/tmp/gnutls-mipsel/lib -lgnutls 2>&1 || echo "Link test done"
+
+    - name: Configure
+      run: |
+        export TOOLCHAIN_DIR=/tmp/mipsel-thingino-linux-musl_sdk-buildroot
+        export PATH=${TOOLCHAIN_DIR}/bin:$PATH
+        export CC=mipsel-thingino-linux-musl-gcc
+        export CXX=mipsel-thingino-linux-musl-g++
+        export AR=mipsel-thingino-linux-musl-ar
+        export STRIP=mipsel-thingino-linux-musl-strip
+        export RANLIB=mipsel-thingino-linux-musl-ranlib
+        export PKG_CONFIG_PATH=/tmp/gnutls-mipsel/lib/pkgconfig:/tmp/ncurses-mipsel/lib/pkgconfig
+        export LDFLAGS="-L/tmp/ncurses-mipsel/lib -L/tmp/gnutls-mipsel/lib"
+        export CPPFLAGS="-I/tmp/ncurses-mipsel/include -I/tmp/gnutls-mipsel/include"
+        export GNUTLS_LIBS="-lgnutls -lhogweed -lnettle -lgmp"
+        export GNUTLS_CFLAGS="-I/tmp/gnutls-mipsel/include"
+        # Cross-compile cache variables to skip runtime tests
+        export ac_cv_lib_gnutls_gnutls_check_version=yes
+        export ac_cv_func_gnutls_priority_set_direct=yes
+        ./configure --host=mipsel-linux-musl --prefix=/usr --disable-nls --with-gnutls=/tmp/gnutls-mipsel --enable-imap --enable-pop --enable-smtp --with-curses=/tmp/ncurses-mipsel
+
+    - name: Build
+      run: |
+        make -j$(nproc)
+
+    - name: Strip binaries
+      run: |
+        mipsel-thingino-linux-musl-strip mutt
+        mipsel-thingino-linux-musl-strip mutt_dotlock || true
+        mipsel-thingino-linux-musl-strip pgpewrap || true
+        mipsel-thingino-linux-musl-strip mutt_pgpring || true
+
+    - name: Prepare artifacts
+      run: |
+        mkdir -p target
+        cp mutt target/mutt_${{ matrix.target_arch }}
+        if [ -f mutt_dotlock ]; then
+          cp mutt_dotlock target/mutt_dotlock_${{ matrix.target_arch }}
+        fi
+        if [ -f pgpewrap ]; then
+          cp pgpewrap target/pgpewrap_${{ matrix.target_arch }}
+        fi
+        if [ -f mutt_pgpring ]; then
+          cp mutt_pgpring target/mutt_pgpring_${{ matrix.target_arch }}
+        fi
+        ls -ltr target/
+        du -sh target/*
+
+    - name: Upload build artifacts
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: mutt-${{ runner.os }}-gcc-${{ matrix.target_arch }}-${{ matrix.build_type }}
+        path: target
+        retention-days: 7
+
+  release:
+    needs: build
+    if: success() && github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+
+    - name: Display structure of downloaded files
+      run: ls -R artifacts
+
+    - name: Create release
+      id: create_release
+      run: |
+        sudo timedatectl set-timezone Asia/Shanghai
+        TAG_NAME="release-$(date +'%Y-%m-%d-%H-%M')"
+        echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
+        echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+
+    - name: Generate release notes
+      id: release_notes
+      run: |
+        GIT_HASH=$(git rev-parse --short ${GITHUB_SHA})
+        LAST_RELEASE_TAG=$(gh release list --limit 2 --json tagName -q '.[1].tagName')
+        if [ -z "$LAST_RELEASE_TAG" ]; then
+          echo "No previous release found." > release_notes.md
+          echo "RELEASE_NOTES_FILE=$(pwd)/release_notes.md" >> $GITHUB_ENV
+          exit 0
+        else
+          echo "Latest release so far is $LAST_RELEASE_TAG"
+        fi
+        COMMITS=$(gh api \
+          -H "Accept: application/vnd.github.v3+json" \
+          /repos/${{ github.repository }}/compare/$LAST_RELEASE_TAG...$GIT_HASH \
+          -q '.commits
+              | sort_by(.commit.author.date)
+              | reverse
+              | .[]
+              | select(
+                  .commit.message != "Merge remote-tracking branch '\''origin/master'\''"
+                  and (.commit.message | contains("workflow") | not)
+                  and (.commit.message | contains("Merge pull request #") | not)
+                )
+              | "\(.sha[0:7]) \(.commit.message | gsub("\n"; " "))"')
+        if [ -z "$COMMITS" ]; then
+          echo "### No changes, nightly rebuild" > release_notes.md
+        else
+          RELEASE_NOTES="### Changes in this release:\n"
+          while IFS= read -r commit; do
+            if [ -n "$commit" ]; then
+              RELEASE_NOTES="${RELEASE_NOTES}- ${commit}\n"
+            fi
+          done <<< "$COMMITS"
+          echo -e "$RELEASE_NOTES" > release_notes.md
+        fi
+        echo "RELEASE_NOTES_FILE=$(pwd)/release_notes.md" >> $GITHUB_ENV
+
+    - name: Release
+      uses: softprops/action-gh-release@v2.1.0
+      with:
+        tag_name: ${{ env.TAG_NAME }}
+        make_latest: false
+        prerelease: true
+        body_path: ${{ env.RELEASE_NOTES_FILE }}
+        files: |
+          artifacts/**/*.tar.gz
+          artifacts/**/mutt_*
+          artifacts/**/mutt_dotlock_*
+          artifacts/**/pgpewrap_*
+          artifacts/**/mutt_pgpring_*
